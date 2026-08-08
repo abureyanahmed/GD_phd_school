@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  
+  <!--<script src="../nodes.js"></script>
+  <script src="../links.js"></script>-->
+
+  <script>
+    const fid = "0"
+
+    const nodesFile = "./nodes_"+fid+".js"; 
+    const script = document.createElement("script");
+    script.src = nodesFile;
+    document.head.appendChild(script);
+
+    const linksFile = "./links_"+fid+".js"; 
+    const script2 = document.createElement("script");
+    script2.src = linksFile;
+    document.head.appendChild(script2);
+  </script>
+  <script src="graph.js"></script>
+  <title>FR Graph – Sequential Update</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f5f5f5;
+      margin: 0;
+      padding: 10px;
+    }
+    #controls {
+      margin-bottom: 10px;
+    }
+    canvas {
+      background: white;
+      border: 1px solid #ccc;
+      display: block;
+    }
+    label {
+      margin-right: 10px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="controls">
+  <label>
+    Graph:
+    <select id="graphType">
+      <optgroup label="Paths">
+        <option value="path3">path3</option>
+        <option value="path5">path5</option>
+        <option value="path10">path10</option>
+        <option value="path20">path20</option>
+      </optgroup>
+      <optgroup label="Cycles">
+        <option value="cycle3">cycle3</option>
+        <option value="cycle5">cycle5</option>
+        <option value="cycle10">cycle10</option>
+        <option value="cycle20">cycle20</option>
+      </optgroup>
+    </select>
+  </label>
+
+  <label>
+    Period (ms):
+    <input type="number" id="periodInput" value="16" min="1" step="1">
+  </label>
+
+  <button id="runBtn">Run</button>
+  <button id="startBtn">Start</button>
+  <button id="stopBtn">Stop</button>
+</div>
+
+<canvas id="graph" width="800" height="600"></canvas>
+
+<div id="bounded_region">
+  <label for="boundary_x">x:</label>
+  <input type="text" id="boundary_x">
+  <label for="boundary_y">y:</label>
+  <input type="text" id="boundary_y">
+  <input type="button" value="next" id="nextBtn">
+</div>
+
+<script>
+const width = 800;
+const height = 600;
+const area = width * height;
+
+const canvas = document.getElementById("graph");
+const ctx = canvas.getContext("2d");
+
+//let nodes = [];
+//let links = [];
+
+let k;
+let temperature;
+const cooling = 0.95;
+
+let intervalId = null;
+let period = 16;
+
+const borderBounded = false;
+const showLabels = true;
+//const showLabels = false;
+
+// ----------------- Boundary -----------------
+
+const boundaryPoints = [];
+
+// (10, 15), (50, 15), (50, 60), (10, 60)
+// boundaryPoints.push({ x:10, y:15 }, { x:50, y:15 }, { x:50, y:60 }, { x:10, y:60 });
+// boundaryPoints.push({ x:1360, y:-1000 }, { x:1360, y:1940 }, { x:-300, y:1940 }, { x:-300, y:-1000 });
+// (100, 10), (10, 100), (190, 100)
+
+document.getElementById("nextBtn").addEventListener("click", () => {
+  const x = parseFloat(document.getElementById("boundary_x").value);
+  const y = parseFloat(document.getElementById("boundary_y").value);
+
+  // Optional: basic validation
+  if (Number.isNaN(x) || Number.isNaN(y)) {
+    alert("Please enter valid numbers for x and y");
+    return;
+  }
+
+  boundaryPoints.push({ x, y });
+
+  console.log("Current points:", boundaryPoints);
+
+  // Optional: clear inputs after adding
+  document.getElementById("boundary_x").value = "";
+  document.getElementById("boundary_y").value = "";
+});
+
+function drawBoundary(ctx, points, transform) {
+  ctx.fillStyle = "#4682b4";
+
+  for (const v of points) {
+    const p = transformPoint(v.x, v.y, transform);
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (points.length < 2) return;
+  
+  ctx.strokeStyle = "#aaa";
+  ctx.beginPath();
+
+  // move to first point
+  const first = transformPoint(points[0].x, points[0].y, transform);
+  ctx.moveTo(first.x, first.y);
+
+  // connect each point to the next
+  for (let i = 1; i < points.length; i++) {
+    const p = transformPoint(points[i].x, points[i].y, transform);
+    ctx.lineTo(p.x, p.y);
+  }
+
+  // close the region
+  ctx.lineTo(first.x, first.y);
+
+  ctx.stroke();
+
+  // optional: fill the region
+  ctx.fillStyle = "rgba(70, 130, 180, 0.15)";
+  ctx.fill();
+}
+
+function isPointInPolygon(polygon, point) {
+  const { x, y } = point;
+  let inside = false;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+
+    const intersects =
+      ((yi > y) !== (yj > y)) &&
+      (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi);
+
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+// ----------------- Graph creation -----------------
+
+function createNodes(n) {
+  nodes = [];
+  for (let i = 0; i < n; i++) {
+    nodes.push({
+      id: i,
+      x: Math.random() * width,
+      y: Math.random() * height
+    });
+  }
+  k = Math.sqrt(area / nodes.length);
+  temperature = width / 10;
+}
+
+function init_k_temp(n) {
+  k = Math.sqrt(area / Object.keys(nodes).length);
+  temperature = width / 10;
+}
+
+function createLinks(type) {
+  links = [];
+
+  const match = type.match(/(path|cycle)(\d+)/);
+  if (!match) return;
+
+  const kind = match[1];
+  const n = parseInt(match[2]);
+
+  if (kind === "path") {
+    for (let i = 0; i < n - 1; i++) {
+      links.push({ source: i, target: i + 1 });
+    }
+  }
+
+  if (kind === "cycle") {
+    for (let i = 0; i < n; i++) {
+      links.push({
+        source: i,
+        target: (i + 1) % n
+      });
+    }
+  }
+}
+
+// ----------------- FR forces -----------------
+
+//const repulsiveStrength = 1.0;
+repulsiveStrength = 0.1;
+function repulsiveForce(d) {
+  //console.log("repulsiveForce", k, d)
+  return repulsiveStrength * (k * k) / d;
+}
+
+attractiveStrength = 10;
+function attractiveForce(d) {
+  return attractiveStrength * (d * d) / k;
+}
+
+
+collisionStrength = 2.0;   // tune this
+collisionRadius = 10
+
+//const centerStrength = 0.01;
+const centerStrength = 0.1;
+function centerForce(distanceToCenter) {
+  return centerStrength * distanceToCenter;
+}
+
+function computeBB(nodes, fix_nodes = new Set()) {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    for (const node of Object.values(nodes)) {
+
+        if (fix_nodes.has(node.id))continue
+
+        minX = Math.min(minX, node.x);
+        minY = Math.min(minY, node.y);
+        maxX = Math.max(maxX, node.x);
+        maxY = Math.max(maxY, node.y);
+    }
+    
+    return (maxX-minX)*(maxY-minY)
+}
+
+function computeCenter(nodes, fix_nodes = new Set()) {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    for (const node of Object.values(nodes)) {
+
+        if (fix_nodes.has(node.id))continue
+
+        minX = Math.min(minX, node.x);
+        minY = Math.min(minY, node.y);
+        maxX = Math.max(maxX, node.x);
+        maxY = Math.max(maxY, node.y);
+    }
+
+    return {
+        cx: (minX + maxX) / 2,
+        cy: (minY + maxY) / 2,
+    };
+}
+
+// ----------------- Sequential step -----------------
+
+function getLineSegments(points) {
+  if (points.length < 2) return [];
+
+  return points.map((point, i) => ({
+    start: point,
+    end: points[(i + 1) % points.length],
+  }));
+}
+
+function getEdgeSegments(nodes, links){
+  if (links.length < 1) return [];
+
+  return links.map((link) => ({
+    start: {x:nodes[link.source].x, y:nodes[link.source].y},
+    end: {x:nodes[link.target].x, y:nodes[link.target].y},
+  }));
+}
+
+/*function lineSegmentsIntersect(a1, a2, b1, b2) {
+  const cross = (p, q, r) =>
+    (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+
+  const onSegment = (p, q, r) =>
+    Math.min(p.x, r.x) <= q.x &&
+    q.x <= Math.max(p.x, r.x) &&
+    Math.min(p.y, r.y) <= q.y &&
+    q.y <= Math.max(p.y, r.y);
+
+  const d1 = cross(a1, a2, b1);
+  const d2 = cross(a1, a2, b2);
+  const d3 = cross(b1, b2, a1);
+  const d4 = cross(b1, b2, a2);
+
+  // Proper intersection
+  if (
+    ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+    ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+  ) {
+    return true;
+  }
+
+  // Collinear cases
+  if (d1 === 0 && onSegment(a1, b1, a2)) return true;
+  if (d2 === 0 && onSegment(a1, b2, a2)) return true;
+  if (d3 === 0 && onSegment(b1, a1, b2)) return true;
+  if (d4 === 0 && onSegment(b1, a2, b2)) return true;
+
+  return false;
+}*/
+
+const EPS = 1e-9;
+
+function cross(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) -
+         (b.y - a.y) * (c.x - a.x);
+}
+
+function sign(v) {
+  if (Math.abs(v) < EPS) return 0;
+  return v > 0 ? 1 : -1;
+}
+
+function onSegment(a, p, b) {
+  return (
+    p.x >= Math.min(a.x, b.x) - EPS &&
+    p.x <= Math.max(a.x, b.x) + EPS &&
+    p.y >= Math.min(a.y, b.y) - EPS &&
+    p.y <= Math.max(a.y, b.y) + EPS
+  );
+}
+
+function lineSegmentsIntersect(a1, a2, b1, b2) {
+  const d1 = sign(cross(a1, a2, b1));
+  const d2 = sign(cross(a1, a2, b2));
+  const d3 = sign(cross(b1, b2, a1));
+  const d4 = sign(cross(b1, b2, a2));
+
+  if (d1 * d2 < 0 && d3 * d4 < 0) return true;
+
+  if (d1 === 0 && onSegment(a1, b1, a2)) return true;
+  if (d2 === 0 && onSegment(a1, b2, a2)) return true;
+  if (d3 === 0 && onSegment(b1, a1, b2)) return true;
+  if (d4 === 0 && onSegment(b1, a2, b2)) return true;
+
+  return false;
+}
+
+function findIntersectingSegment(segments, line) {
+  return segments.find(segment =>
+    lineSegmentsIntersect(
+      segment.start,
+      segment.end,
+      line.start,
+      line.end
+    )
+  );
+}
+
+function shareEndPoints(l1, l2){
+  if((l1.start.x==l2.start.x)&&(l1.start.y==l2.start.y))
+    return true
+  if((l1.start.x==l2.end.x)&&(l1.start.y==l2.end.y))
+    return true
+  if((l1.end.x==l2.start.x)&&(l1.end.y==l2.start.y))
+    return true
+  if((l1.end.x==l2.end.x)&&(l1.end.y==l2.end.y))
+    return true
+  return false
+}
+
+function edgesIntersect(segments){
+  for(let i=0;i<segments.length;i++){
+    for(let j=i+1;j<segments.length;j++){
+      let l1 = segments[i]
+      let l2 = segments[j]
+      if (!shareEndPoints(l1, l2)){
+        let intersects = lineSegmentsIntersect(
+          l1.start,
+          l1.end,
+          l2.start,
+          l2.end
+        )
+        if(intersects)return true
+      }
+    }
+  }
+  return false
+}
+
+/*function findIntersectingPoint(segment1,segment2){
+  let p1 = segment1.start
+  let p2 = segment1.end
+  let p3 = segment2.start
+  let p4 = segment2.end
+
+  let denominator = (p4.y - p3.y) * (p2.x - p1.x) - (p4.x - p3.x) * (p2.y - p1.y)
+  if(denominator==0)
+    return null
+
+  let ua = ((p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x))/denominator
+  let ub = ((p2.x - p1.x) * (p1.y - p3.y) - (p2.y - p1.y) * (p1.x - p3.x))/denominator
+
+  if(ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1){
+    let x = p1.x + ua * (p2.x - p1.x)
+    let y = p1.y + ua * (p2.y - p1.y)
+    return {x, y}
+  }
+
+  return null
+  
+}*/
+
+function findIntersectingPoint(s1, s2) {
+  const EPS = 1e-9;
+
+  const p = s1.start;
+  const r = {
+    x: s1.end.x - s1.start.x,
+    y: s1.end.y - s1.start.y,
+  };
+
+  const q = s2.start;
+  const s = {
+    x: s2.end.x - s2.start.x,
+    y: s2.end.y - s2.start.y,
+  };
+
+  const cross = (a, b) => a.x * b.y - a.y * b.x;
+
+  const rxs = cross(r, s);
+  const qmp = {
+    x: q.x - p.x,
+    y: q.y - p.y,
+  };
+
+  if (Math.abs(rxs) < EPS) {
+    return null; // parallel or collinear
+  }
+
+  const t = cross(qmp, s) / rxs;
+  const u = cross(qmp, r) / rxs;
+
+  if (
+    t < -EPS || t > 1 + EPS ||
+    u < -EPS || u > 1 + EPS
+  ) {
+    return null;
+  }
+
+  const tc =
+    Math.abs(t) < EPS ? 0 :
+    Math.abs(t - 1) < EPS ? 1 :
+    t;
+
+  return {
+    x: p.x + tc * r.x,
+    y: p.y + tc * r.y,
+  };
+}
+
+function getPointAlongLine(start, end, percent = 0.95){
+  let x = start.x + percent * (end.x - start.x)
+  let y = start.y + percent * (end.y - start.y)
+  //console.log("start end percent", start, end, percent, start.x + percent*(end.x - start.x), start.y, percent*(end.y - start.y))
+
+  return {x, y}
+  
+}
+
+function crossings_from_nodes(non_isolated_nodes, links){
+  // find new point, update if no crossing
+  let edgeSegments = getEdgeSegments(non_isolated_nodes, links)
+  return edgesIntersect(edgeSegments)
+}
+
+//function update_vertex_pos(v, v_new){
+function update_vertex_pos(v, v_new, non_isolated_nodes, links){
+  let v_old = {x:v.x, y:v.y}
+  v.x = v_new.x
+  v.y = v_new.y
+
+  if(crossings_from_nodes(non_isolated_nodes, links)){
+    console.log(v, "introduces crossing, updating.")
+    console.log("Old position", v_old)
+    //let attempt = 10
+    let attempts = 0
+    //while(crossings_from_nodes(non_isolated_nodes, links) && attempt>0){
+    while(crossings_from_nodes(non_isolated_nodes, links)){
+      //let new_pos = getPointAlongLine(v_old, v, percent = 0.95)
+      let new_pos = getPointAlongLine(v_old, v, percent = 0.55)
+      v.x = new_pos.x
+      v.y = new_pos.y
+      //attempt -= 1
+      attempts++
+      if (attempts % 1000 === 0) {
+        let proceed = confirm(`Tried ${attempts} times. Crossings still exist. Do you want to keep trying?`);
+        if (!proceed) {
+          console.log("User stopped the loop after", attempts, "attempts.");
+          break; // Exits the while loop immediately
+        }
+      }
+    }
+    if(crossings_from_nodes(non_isolated_nodes, links))
+      console.log("Crossings exist, try more!")
+  }
+  else
+    console.log("No edges intersect")
+}
+
+//function move_point_safe(fx, fy, v, temperature, boundaryPoints){
+function move_point_safe(fx, fy, v, temperature, boundaryPoints, non_isolated_nodes, links){
+  // find new point, update if not going outside
+  const disp = Math.hypot(fx, fy) || 0.01;
+  //console.log("fx, fy, disp", fx, fy, disp)
+  let x_new = v.x + (fx / disp) * Math.min(disp, temperature);
+  let y_new = v.y + (fy / disp) * Math.min(disp, temperature);
+  //console.log("new", x_new, y_new)
+
+  let v_new = {x:x_new, y:y_new}
+
+  let inside_org = isPointInPolygon(boundaryPoints, v)
+  if(inside_org)
+    console.log(v.label, 'was inside the boundary')
+  else
+    console.log(v.label, 'was outside of the boundary')
+
+  let inside = isPointInPolygon(boundaryPoints, v_new)
+  if(inside)
+    console.log(v.label, 'remained inside the boundary')
+  else
+    console.log(v.label, 'went outside of the boundary')
+
+  if(inside){
+    //console.log("updating", v)
+    //v.x = x_new
+    //v.y = y_new
+    //update_vertex_pos(v, v_new)
+    update_vertex_pos(v, v_new, non_isolated_nodes, links)
+  }
+  else{
+    let line_segments = getLineSegments(boundaryPoints)
+    let movement_segment = {start:v, end:v_new}
+    //console.log("line_segments", line_segments)
+    //console.log("movement_segment", movement_segment)
+    let intersecting_segment = findIntersectingSegment(line_segments, movement_segment)
+    console.log(intersecting_segment)
+    let intersectingPoint = findIntersectingPoint(intersecting_segment, movement_segment)
+    //if(intersecting_segment!=null)
+    //  console.log(intersectingPoint)
+    v_new = getPointAlongLine(v, intersectingPoint)
+    //console.log("v_new", v_new)
+    //v.x = v_new.x
+    //v.y = v_new.y
+    //update_vertex_pos(v, v_new)
+    update_vertex_pos(v, v_new, non_isolated_nodes, links)
+  }
+}
+
+//function step() {
+function step(non_isolated_nodes, links, fix_nodes = new Set()) {
+  //for (let i = 0; i < nodes.length; i++) {
+  //for (let i in nodes) {
+  for (let i in non_isolated_nodes) {
+    //const v = nodes[i];
+    const v = non_isolated_nodes[i];
+
+    if (fix_nodes.has(v.id)){
+      console.log("Fix node, continuing!")
+      continue
+    }
+    else console.log("Not fix node, computing forces!")
+
+    let fx = 0;
+    let fy = 0;
+
+    // Repulsion
+    //for (let j = 0; j < nodes.length; j++) {
+    //for (let j in nodes) {
+    for (let j in non_isolated_nodes) {
+      if (i === j) continue;
+
+      //const u = nodes[j];
+      const u = non_isolated_nodes[j];
+
+      /*if (fix_nodes.has(u.id)){
+        console.log("Fix node, continuing!")
+        continue
+      }
+      else console.log("Not fix node, computing forces!")*/
+
+      let dx = v.x - u.x;
+      let dy = v.y - u.y;
+      let dist = Math.hypot(dx, dy) || 0.01;
+
+      const f = repulsiveForce(dist);
+      dx /= dist;
+      dy /= dist;
+
+      let cur_fx = dx * f
+      let cur_fy = dy * f
+
+      //move_point_safe(cur_fx, cur_fy, v, temperature, boundaryPoints)
+
+      //console.log("repulsion", dist, f, dx, dy, cur_fx, cur_fy)
+
+      fx += cur_fx;
+      fy += cur_fy;
+    }
+
+    // Attraction
+    for (const e of links) {
+      let u = null;
+
+      if (e.source == i) u = nodes[e.target];
+      else if (e.target == i) u = nodes[e.source];
+      else continue;
+
+      /*if (fix_nodes.has(u.id)){
+        console.log("Fix node, continuing!")
+        continue
+      }
+      else console.log("Not fix node, computing forces!")*/
+
+      let dx = v.x - u.x;
+      let dy = v.y - u.y;
+      let dist = Math.hypot(dx, dy) || 0.01;
+
+      const f = attractiveForce(dist);
+      dx /= dist;
+      dy /= dist;
+
+      let cur_fx = dx * f
+      let cur_fy = dy * f
+
+      //move_point_safe(cur_fx, cur_fy, v, temperature, boundaryPoints)
+      //console.log("attraction", dist, cur_fx, cur_fy)
+
+      fx -= cur_fx;
+      fy -= cur_fy;
+    }
+
+    // center force
+    //let { cx, cy } = computeCenter(nodes);
+    let { cx, cy } = computeCenter(non_isolated_nodes, fix_nodes);
+    let dx = cx - v.x;
+    let dy = cy - v.y;
+    let dist = Math.hypot(dx, dy) || 0.01;
+
+    let f = centerForce(dist);
+
+    let cur_fx = (dx / dist) * f
+    let cur_fy = (dy / dist) * f
+
+    //move_point_safe(cur_fx, cur_fy, v, temperature, boundaryPoints)
+
+    //console.log("f, c, cur, dist", f, cx, cy, cur_fx, cur_fy, dist)
+
+    fx += cur_fx;
+    fy += cur_fy;
+
+    // Collision force
+    for (let j in non_isolated_nodes) {
+      if (i === j) continue;
+
+      const u = non_isolated_nodes[j];
+
+      let dx = v.x - u.x;
+      let dy = v.y - u.y;
+      let dist = Math.hypot(dx, dy) || 0.01;
+
+      // If nodes don't have individual radii, use a constant.
+      const r1 = v.r ?? collisionRadius;
+      const r2 = u.r ?? collisionRadius;
+
+      const minDist = r1 + r2;
+
+      if (dist < minDist) {
+        // overlap amount
+        const overlap = minDist - dist;
+
+        dx /= dist;
+        dy /= dist;
+
+        fx += dx * overlap * collisionStrength;
+        fy += dy * overlap * collisionStrength;
+      }
+    }
+
+    // find new point, update if not going outside
+    /*const disp = Math.hypot(fx, fy) || 0.01;
+    let x_new = v.x + (fx / disp) * Math.min(disp, temperature);
+    let y_new = v.y + (fy / disp) * Math.min(disp, temperature);
+    if(isPointInPolygon(boundaryPoints, {x:x_new, y:y_new})){
+      v.x = x_new
+      v.y = y_new
+    }*/
+
+    //move_point_safe(fx, fy, v, temperature, boundaryPoints)
+    move_point_safe(fx, fy, v, temperature, boundaryPoints, non_isolated_nodes, links)
+
+    // Move immediately
+    //const disp = Math.hypot(fx, fy) || 0.01;
+    //v.x += (fx / disp) * Math.min(disp, temperature);
+    //v.y += (fy / disp) * Math.min(disp, temperature);
+
+    /*let inside = isPointInPolygon(boundaryPoints, v)
+    if(inside)
+      console.log(v.label, 'remained inside the boundary')
+    else
+      console.log(v.label, 'went outside of the boundary')*/
+
+    if(borderBounded){
+      v.x = Math.min(width, Math.max(0, v.x));
+      v.y = Math.min(height, Math.max(0, v.y));
+    }
+  }
+
+  temperature *= cooling;
+}
+
+// ----------------- Bounding box ------------
+
+function getCenterBoundary(points){
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    for (const node of points) {
+        minX = Math.min(minX, node.x);
+        minY = Math.min(minY, node.y);
+        maxX = Math.max(maxX, node.x);
+        maxY = Math.max(maxY, node.y);
+    }
+
+    return [(minX + maxX)/2, (minY +maxY)/2]
+}
+
+// ----------------- Drawing -----------------
+
+function computeTransform(nodes, width, height, padding = 20) {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    for (const node of Object.values(nodes)) {
+        minX = Math.min(minX, node.x);
+        minY = Math.min(minY, node.y);
+        maxX = Math.max(maxX, node.x);
+        maxY = Math.max(maxY, node.y);
+    }
+
+    console.log("Boundary box: (min)", minX, minY, "(max)", maxX, maxY)
+
+    const graphWidth = Math.max(maxX - minX, 1);
+    const graphHeight = Math.max(maxY - minY, 1);
+
+    const scale = Math.min(
+        (width - 2 * padding) / graphWidth,
+        (height - 2 * padding) / graphHeight
+    );
+
+    // Center the graph
+    const tx =
+        (width - graphWidth * scale) / 2 - minX * scale;
+
+    const ty =
+        (height - graphHeight * scale) / 2 - minY * scale;
+
+    return { scale, tx, ty };
+}
+
+function transformPoint(x, y, transform) {
+    return {
+        x: x * transform.scale + transform.tx,
+        y: y * transform.scale + transform.ty,
+    };
+}
+
+//function draw() {
+function draw(non_isolated_nodes, links) {
+  ctx.clearRect(0, 0, width, height);
+
+  //const tr = computeTransform(nodes, canvas.width, canvas.height, 40);
+  const tr = computeTransform(non_isolated_nodes, canvas.width, canvas.height, 40);
+  console.log(tr)
+
+  ctx.strokeStyle = "#aaa";
+  ctx.beginPath();
+
+  for (const e of links) {
+      const s = nodes[e.source];
+      const t = nodes[e.target];
+
+      const ps = transformPoint(s.x, s.y, tr);
+      const pt = transformPoint(t.x, t.y, tr);
+
+      ctx.moveTo(ps.x, ps.y);
+      ctx.lineTo(pt.x, pt.y);
+  }
+
+  ctx.stroke();
+
+  ctx.fillStyle = "#4682b4";
+
+  //for (const v of nodes) {
+  //for (let i in nodes) {
+  for (let i in non_isolated_nodes) {
+      //let v = nodes[i]
+      let v = non_isolated_nodes[i]
+      const p = transformPoint(v.x, v.y, tr);
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+  }
+
+  // Set your text styles
+  if(showLabels){
+    ctx.font = '16px sans-serif';
+    ctx.fillStyle = 'black';
+    ctx.textBaseline = 'top';
+
+    // Loop and draw (assuming your nodes have x and y coordinates)
+    //nodes.forEach(node => {
+    //for(let i in nodes){
+    for(let i in non_isolated_nodes){
+        //let node = nodes[i]
+        let node = non_isolated_nodes[i]
+        const p = transformPoint(node.x, node.y, tr);
+        ctx.fillText(node.label, p.x, p.y);
+    //});
+    }
+  }
+
+  drawBoundary(ctx, boundaryPoints, tr)
+
+}
+
+// ----------------- Animation control -----------------
+
+function startAnimation() {
+  stopAnimation();
+  intervalId = setInterval(() => {
+    step();
+    draw();
+  }, period);
+}
+
+function stopAnimation() {
+  if (intervalId !== null) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+}
+
+// ----------------- UI -----------------
+
+document.getElementById("runBtn").addEventListener("click", () => {
+  const type = document.getElementById("graphType").value;
+  const n = parseInt(type.match(/\d+/)[0]);
+
+  stopAnimation();
+  //createNodes(n);
+  //createLinks(type);
+  init_k_temp();
+  console.log(nodes, links)
+  draw();
+});
+
+document.getElementById("startBtn").addEventListener("click", startAnimation);
+document.getElementById("stopBtn").addEventListener("click", stopAnimation);
+
+document.getElementById("periodInput").addEventListener("change", (e) => {
+  period = Math.max(1, parseInt(e.target.value));
+  if (intervalId !== null) startAnimation();
+});
+
+// initial graph
+//createNodes(3);
+//createLinks("path3");
+//init_k_temp();
+//draw();
+</script>
+
+</body>
+</html>
